@@ -4463,6 +4463,21 @@ mod tests {
         }
     }
 
+    fn codex_global_test_paths(home_dir: &Path, codex_dir: &Path) -> CodexPluginPaths {
+        CodexPluginPaths {
+            plugin_dir: codex_dir.join(PLUGIN_SUBDIR).join(CODEX_PLUGIN_NAME),
+            marketplace_path: home_dir
+                .join(".agents")
+                .join(PLUGIN_SUBDIR)
+                .join("marketplace.json"),
+            marketplace_source_path: format!("./{CODEX_DIR}/{PLUGIN_SUBDIR}/{CODEX_PLUGIN_NAME}"),
+            marketplace_name: CODEX_PERSONAL_MARKETPLACE_NAME,
+            marketplace_display_name: CODEX_PERSONAL_MARKETPLACE_DISPLAY_NAME,
+            legacy_agents_md_path: codex_dir.join(AGENTS_MD),
+            legacy_rtk_md_path: codex_dir.join(RTK_MD),
+        }
+    }
+
     #[test]
     fn test_init_mentions_all_top_level_commands() {
         for cmd in [
@@ -6303,9 +6318,9 @@ mod tests {
     fn test_run_codex_mode_global_registers_plugin_package_and_marketplace() {
         let tmp = TempDir::new().unwrap();
         with_codex_env_override(&tmp, |home_dir, codex_dir| {
-            run_codex_mode(true, InitContext::default()).unwrap();
+            let paths = codex_global_test_paths(home_dir, codex_dir);
+            run_codex_mode_with_paths(paths.clone(), true, InitContext::default()).unwrap();
 
-            let paths = codex_plugin_paths(true).unwrap();
             assert_eq!(
                 paths.plugin_dir,
                 codex_dir.join(PLUGIN_SUBDIR).join(CODEX_PLUGIN_NAME)
@@ -6356,7 +6371,11 @@ mod tests {
 
             let result = (|| -> Result<()> {
                 run_codex_mode(false, InitContext::default())?;
-                run_codex_mode(true, InitContext::default())?;
+                run_codex_mode_with_paths(
+                    codex_global_test_paths(_home_dir, codex_dir),
+                    true,
+                    InitContext::default(),
+                )?;
                 show_codex_config()
             })();
             std::env::set_current_dir(&cwd).unwrap();
