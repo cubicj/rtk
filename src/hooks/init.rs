@@ -2301,8 +2301,13 @@ fn run_codex_mode_with_paths(
                 println!("    - {}", item);
             }
         }
-        println!("\n  Restart Codex, enable/install the RTK plugin if prompted, then review and trust the RTK plugin hook in /hooks.");
-        println!("  Codex plugin hooks require the hooks and plugin_hooks features to be enabled.");
+        if global {
+            println!("\n  Next: codex plugin add rtk-codex@personal");
+        } else {
+            println!("\n  Next: codex plugin add rtk-codex@rtk-local");
+        }
+        println!("  Then restart Codex and review/trust the RTK plugin hook in /hooks.");
+        println!("  Codex plugin hooks require the hooks feature to be enabled.");
     }
 
     Ok(())
@@ -3945,6 +3950,8 @@ fn show_codex_config() -> Result<()> {
     println!(
         "  rtk init -g --codex               # Register personal RTK Codex plugin marketplace"
     );
+    println!("  codex plugin add rtk-codex@rtk-local  # Install local RTK Codex plugin");
+    println!("  codex plugin add rtk-codex@personal   # Install personal RTK Codex plugin");
     println!("  rtk init --codex --uninstall      # Remove local RTK Codex plugin state");
     println!("  rtk init -g --codex --uninstall   # Remove personal RTK Codex plugin state");
 
@@ -4010,7 +4017,6 @@ fn print_codex_feature_status(codex_dir: &Path) -> Result<()> {
         .with_context(|| format!("Failed to parse Codex config: {}", config_path.display()))?;
 
     print_codex_feature_line("hooks", codex_feature_value(&parsed, "hooks"));
-    print_codex_feature_line("plugin_hooks", codex_feature_value(&parsed, "plugin_hooks"));
     Ok(())
 }
 
@@ -6357,11 +6363,7 @@ mod tests {
     fn test_show_codex_config_handles_installed_plugin_and_feature_flags() {
         let tmp = TempDir::new().unwrap();
         with_codex_env_override(&tmp, |_home_dir, codex_dir| {
-            fs::write(
-                codex_dir.join("config.toml"),
-                "[features]\nhooks = true\nplugin_hooks = false\n",
-            )
-            .unwrap();
+            fs::write(codex_dir.join("config.toml"), "[features]\nhooks = true\n").unwrap();
 
             let project_dir = tmp.path().join("project");
             fs::create_dir_all(&project_dir).unwrap();

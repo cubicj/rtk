@@ -4,7 +4,7 @@
 
 ## Package Layout
 
-`rtk init --codex` registers the RTK Codex plugin through a local Codex marketplace instead of creating new loose `RTK.md` or `AGENTS.md` guidance files.
+`rtk init --codex` registers the RTK Codex plugin through a local Codex marketplace instead of creating new loose `RTK.md` or `AGENTS.md` guidance files. After registration, install it with `codex plugin add rtk-codex@rtk-local` for a local setup or `codex plugin add rtk-codex@personal` for a global setup.
 
 The source package lives at [`rtk-codex/`](rtk-codex/):
 
@@ -31,7 +31,7 @@ Codex currently supports rewritten input only with `permissionDecision: "allow"`
 
 ## Activation and Trust
 
-Codex plugin hooks require the Codex `hooks` and `plugin_hooks` features to be active. After installation, restart Codex and use `/hooks` to review and trust the RTK plugin hook when Codex asks for hook trust.
+Codex plugin hooks require the Codex `hooks` feature to be active. After installation, restart Codex and use `/hooks` to review and trust the RTK plugin hook when Codex asks for hook trust.
 
 The legacy `rtk-awareness.md` file is retained only as compatibility context for previous instruction-only installs.
 

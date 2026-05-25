@@ -20,10 +20,11 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 
 rtk init -g --codex
+codex plugin add rtk-codex@personal
 ```
 
-Restart Codex, enable or install the RTK plugin if Codex prompts for it, then
-review and trust the RTK hook from `/hooks` or the Codex settings panel.
+Restart Codex, then review and trust the RTK hook from `/hooks` or the Codex
+settings panel.
 
 ## What gets installed
 
@@ -35,9 +36,12 @@ environment:
 - A plugin-owned `PreToolUse` hook that runs `rtk hook codex`
 - A bundled `$rtk` skill that explains RTK behavior and validation
 
+`rtk init -g --codex` registers the plugin marketplace entry. `codex plugin add
+rtk-codex@personal` installs and enables that registered plugin.
+
 For project-local setup, run `rtk init --codex` inside the project. That writes
 the local plugin package under the project plugin directory and registers it in
-the local marketplace.
+the local marketplace. Then run `codex plugin add rtk-codex@rtk-local`.
 
 ## Behavior
 
