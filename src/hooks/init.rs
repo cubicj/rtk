@@ -13,11 +13,12 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CODEX_HOOK_COMMAND,
+    CODEX_HOOK_COMMAND_WINDOWS, CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR,
+    PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -273,13 +274,7 @@ pub fn run(
         if hook_only {
             anyhow::bail!("--codex cannot be combined with --hook-only");
         }
-        if matches!(patch_mode, PatchMode::Auto) {
-            anyhow::bail!("--codex cannot be combined with --auto-patch");
-        }
-        if matches!(patch_mode, PatchMode::Skip) {
-            anyhow::bail!("--codex cannot be combined with --no-patch");
-        }
-        run_codex_mode(global, ctx)?;
+        run_codex_mode(global, patch_mode, ctx)?;
     } else {
         // Validation: Global-only features
         if install_opencode && !global {
@@ -925,6 +920,11 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         removed.push("AGENTS.md: removed @RTK.md reference".to_string());
     }
 
+    let hooks_json_path = codex_dir.join(HOOKS_JSON);
+    if remove_codex_hook_from_file(&hooks_json_path, ctx)? {
+        removed.push("hooks.json: removed RTK Codex hook".to_string());
+    }
+
     Ok(removed)
 }
 
@@ -1114,6 +1114,213 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .any(|cmd| {
             cmd == hook_command || cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE)
         })
+}
+
+fn patch_codex_hooks_json(path: &Path, mode: PatchMode, ctx: InitContext) -> Result<PatchResult> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut root = if path.exists() {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    if codex_hook_already_present(&root) {
+        if verbose > 0 {
+            eprintln!("hooks.json: Codex hook already present");
+        }
+        return Ok(PatchResult::AlreadyPresent);
+    }
+
+    match mode {
+        PatchMode::Skip => {
+            print_codex_manual_instructions(path);
+            return Ok(PatchResult::Skipped);
+        }
+        PatchMode::Ask => {
+            if dry_run {
+                println!("[dry-run] would prompt before patching {}", path.display());
+            } else if !prompt_user_consent(path)? {
+                print_codex_manual_instructions(path);
+                return Ok(PatchResult::Declined);
+            }
+        }
+        PatchMode::Auto => {}
+    }
+
+    insert_codex_hook_entry(&mut root)?;
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
+
+    if dry_run {
+        println!("[dry-run] would patch Codex hooks.json: {}", path.display());
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(PatchResult::WouldPatch);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+
+    if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        fs::copy(path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Backup: {}", backup_path.display());
+        }
+    }
+
+    atomic_write(path, &serialized)?;
+
+    Ok(PatchResult::Patched)
+}
+
+fn print_codex_manual_instructions(path: &Path) {
+    println!("\n  MANUAL STEP: Add this to {}:", path.display());
+    println!("  {{");
+    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
+    println!("      \"matcher\": \"Bash\",");
+    println!("      \"hooks\": [{{ \"type\": \"command\",");
+    println!("        \"command\": \"{}\",", CODEX_HOOK_COMMAND);
+    println!(
+        "        \"commandWindows\": \"{}\"",
+        CODEX_HOOK_COMMAND_WINDOWS
+    );
+    println!("      }}]");
+    println!("    }}]}}");
+    println!("  }}");
+    println!("\n  Then restart Codex CLI. Test with: git status\n");
+}
+
+fn codex_hook_already_present(root: &serde_json::Value) -> bool {
+    let pre_tool_use_array = match root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    pre_tool_use_array
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .any(codex_hook_matches)
+}
+
+fn codex_hook_matches(hook: &serde_json::Value) -> bool {
+    hook.get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|cmd| cmd == CODEX_HOOK_COMMAND)
+        || hook
+            .get("commandWindows")
+            .and_then(|c| c.as_str())
+            .is_some_and(|cmd| cmd == CODEX_HOOK_COMMAND_WINDOWS)
+}
+
+fn insert_codex_hook_entry(root: &mut serde_json::Value) -> Result<()> {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut().expect("just-created json object")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks value is not an object")?;
+
+    let pre_tool_use = hooks
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("PreToolUse value is not an array")?;
+
+    pre_tool_use.push(serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": CODEX_HOOK_COMMAND,
+            "commandWindows": CODEX_HOOK_COMMAND_WINDOWS,
+            "statusMessage": "RTK is rewriting a Bash command for token-optimized output",
+            "timeout": 30
+        }]
+    }));
+    Ok(())
+}
+
+fn remove_codex_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let pre_tool_use = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let original_len = pre_tool_use.len();
+    pre_tool_use.retain(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|hooks| hooks.as_array())
+            .is_none_or(|hooks| !hooks.iter().any(codex_hook_matches))
+    });
+    pre_tool_use.len() < original_len
+}
+
+fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let mut root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as JSON", path.display()))?;
+
+    if !remove_codex_hook_from_json(&mut root) {
+        return Ok(false);
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK Codex hook from {}",
+            path.display()
+        );
+        return Ok(true);
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
+    atomic_write(path, &serialized)?;
+
+    if verbose > 0 {
+        eprintln!("Removed RTK Codex hook from {}", path.display());
+    }
+
+    Ok(true)
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
@@ -2256,21 +2463,38 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
-    let (agents_md_path, rtk_md_path) = if global {
+fn run_codex_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
+    let (agents_md_path, rtk_md_path, hooks_json_path) = if global {
         let codex_dir = resolve_codex_dir()?;
-        (codex_dir.join(AGENTS_MD), codex_dir.join(RTK_MD))
+        (
+            codex_dir.join(AGENTS_MD),
+            codex_dir.join(RTK_MD),
+            codex_dir.join(HOOKS_JSON),
+        )
     } else {
-        (PathBuf::from(AGENTS_MD), PathBuf::from(RTK_MD))
+        (
+            PathBuf::from(AGENTS_MD),
+            PathBuf::from(RTK_MD),
+            PathBuf::from(CODEX_DIR).join(HOOKS_JSON),
+        )
     };
 
-    run_codex_mode_with_paths(agents_md_path, rtk_md_path, global, ctx)
+    run_codex_mode_with_paths(
+        agents_md_path,
+        rtk_md_path,
+        hooks_json_path,
+        global,
+        patch_mode,
+        ctx,
+    )
 }
 
 fn run_codex_mode_with_paths(
     agents_md_path: PathBuf,
     rtk_md_path: PathBuf,
+    hooks_json_path: PathBuf,
     global: bool,
+    patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
@@ -2300,6 +2524,7 @@ fn run_codex_mode_with_paths(
 
     write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, RTK_MD, ctx)?;
     let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
+    let patch_result = patch_codex_hooks_json(&hooks_json_path, patch_mode, ctx)?;
 
     if !dry_run {
         println!("\nRTK configured for Codex CLI.\n");
@@ -2319,6 +2544,12 @@ fn run_codex_mode_with_paths(
                 "\n  Codex project instructions path: {}",
                 agents_md_path.display()
             );
+        }
+        match patch_result {
+            PatchResult::Patched => println!("  hooks.json: hook added"),
+            PatchResult::AlreadyPresent => println!("  hooks.json: hook already present"),
+            PatchResult::Declined | PatchResult::Skipped => {}
+            PatchResult::WouldPatch => {}
         }
     }
 
@@ -2740,7 +2971,7 @@ fn resolve_claude_dir_from(
         .context("Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.")
 }
 
-fn resolve_codex_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_codex_dir_from(
         std::env::var_os("CODEX_HOME").map(PathBuf::from),
         dirs::home_dir(),
@@ -4374,47 +4605,106 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_mode_rejects_auto_patch() {
-        let err = run(
+    fn test_codex_mode_accepts_auto_patch() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
+        let hooks_json = temp.path().join("hooks.json");
+
+        run_codex_mode_with_paths(
+            agents_md,
+            rtk_md,
+            hooks_json.clone(),
             false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            true,
             PatchMode::Auto,
             InitContext::default(),
         )
-        .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "--codex cannot be combined with --auto-patch"
-        );
+        .unwrap();
+
+        let content = fs::read_to_string(&hooks_json).unwrap();
+        assert!(content.contains(CODEX_HOOK_COMMAND));
+        assert!(content.contains(CODEX_HOOK_COMMAND_WINDOWS));
     }
 
     #[test]
-    fn test_codex_mode_rejects_no_patch() {
-        let err = run(
+    fn test_codex_mode_accepts_no_patch() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
+        let hooks_json = temp.path().join("hooks.json");
+
+        run_codex_mode_with_paths(
+            agents_md,
+            rtk_md,
+            hooks_json.clone(),
             false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            true,
             PatchMode::Skip,
             InitContext::default(),
         )
-        .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "--codex cannot be combined with --no-patch"
-        );
+        .unwrap();
+
+        assert!(!hooks_json.exists());
+    }
+
+    #[test]
+    fn test_insert_codex_hook_entry_preserves_existing_hooks() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Read",
+                    "hooks": [{ "type": "command", "command": "echo read" }]
+                }]
+            }
+        });
+
+        insert_codex_hook_entry(&mut root).unwrap();
+
+        let entries = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let codex_hook = &entries[1]["hooks"][0];
+        assert_eq!(codex_hook["command"], CODEX_HOOK_COMMAND);
+        assert_eq!(codex_hook["commandWindows"], CODEX_HOOK_COMMAND_WINDOWS);
+    }
+
+    #[test]
+    fn test_codex_hook_already_present_matches_windows_command() {
+        let root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": CODEX_HOOK_COMMAND,
+                        "commandWindows": CODEX_HOOK_COMMAND_WINDOWS
+                    }]
+                }]
+            }
+        });
+
+        assert!(codex_hook_already_present(&root));
+    }
+
+    #[test]
+    fn test_remove_codex_hook_from_json_leaves_other_hooks() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": CODEX_HOOK_COMMAND }]
+                    },
+                    {
+                        "matcher": "Read",
+                        "hooks": [{ "type": "command", "command": "echo read" }]
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_codex_hook_from_json(&mut root));
+        let entries = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["matcher"], "Read");
     }
 
     #[test]
@@ -4989,11 +5279,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
         let rtk_md = temp.path().join("RTK.md");
+        let hooks_json = temp.path().join("hooks.json");
 
         run_codex_mode_with_paths(
             agents_md.clone(),
             rtk_md.clone(),
+            hooks_json,
             true,
+            PatchMode::Auto,
             InitContext::default(),
         )
         .unwrap();
@@ -5184,11 +5477,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
         let rtk_md = temp.path().join("RTK.md");
+        let hooks_json = temp.path().join("hooks.json");
 
         run_codex_mode_with_paths(
             agents_md.clone(),
             rtk_md.clone(),
+            hooks_json.clone(),
             true,
+            PatchMode::Auto,
             InitContext {
                 dry_run: true,
                 ..Default::default()
@@ -5205,6 +5501,11 @@ mod tests {
             !agents_md.exists(),
             "dry-run must not create AGENTS.md: {}",
             agents_md.display()
+        );
+        assert!(
+            !hooks_json.exists(),
+            "dry-run must not create hooks.json: {}",
+            hooks_json.display()
         );
     }
 
