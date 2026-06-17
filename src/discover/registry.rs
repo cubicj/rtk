@@ -798,6 +798,14 @@ fn rewrite_segment_inner(
         }
     }
 
+    let mode_cmd = ENV_PREFIX.replace(cmd_part, "");
+    if is_rg_file_listing(mode_cmd.trim()) {
+        return None;
+    }
+    if is_rg_leading_option_search(mode_cmd.trim()) {
+        return None;
+    }
+
     let match_cmd = normalize_python_module_invocation(cmd_part);
     let match_cmd = match_cmd.as_ref();
 
@@ -915,6 +923,20 @@ fn split_first_word(cmd: &str) -> Option<(&str, &str)> {
         .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))
         .unwrap_or(trimmed.len());
     Some((&trimmed[..split_at], &trimmed[split_at..]))
+}
+
+fn is_rg_file_listing(cmd: &str) -> bool {
+    let tokens = shell_split(cmd);
+    tokens.first().is_some_and(|token| token == "rg")
+        && tokens.iter().skip(1).any(|token| token == "--files")
+}
+
+fn is_rg_leading_option_search(cmd: &str) -> bool {
+    let tokens = shell_split(cmd);
+    tokens.first().is_some_and(|token| token == "rg")
+        && tokens
+            .get(1)
+            .is_some_and(|token| token.starts_with('-') && token != "-")
 }
 
 /// Short flags whose clap meaning under an rtk subcommand collides with a
@@ -1532,6 +1554,26 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
             Some("rtk grep \"fn main\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_passthrough() {
+        assert_eq!(rewrite_command_no_prefixes("rg --files", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"rg --files -g "*.test.ts" src test tests"#, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_leading_flags_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"rg --line-number --ignore-case "Codex|\.codex" C:\Users\CubicJ\.codex\memories\MEMORY.md"#,
+                &[],
+            ),
+            None
         );
     }
 
