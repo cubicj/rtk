@@ -1095,6 +1095,20 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_unsupported_gnu_find_passthrough() {
+        assert!(
+            run_codex_inner(&codex_input(
+                r"find /mnt/c/Dev/Risuai -maxdepth 1 \( -name .agents -o -name Docs -o -name scripts -o -name AGENTS.override.md \) -printf '%M %u %g %s %TY-%Tm-%Td %TH:%TM %p\n'"
+            ))
+            .is_none()
+        );
+        assert!(run_codex_inner(&codex_input(
+            "find .agents Docs -type d -exec chmod 755 {} +"
+        ))
+        .is_none());
+    }
+
+    #[test]
     fn test_claude_rewrite_git_status() {
         let result = run_claude_inner(&claude_input("git status")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
