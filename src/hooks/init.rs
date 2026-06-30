@@ -64,7 +64,6 @@ schema_version = 1
 
 const RTK_MD: &str = "RTK.md";
 const CLAUDE_MD: &str = "CLAUDE.md";
-const AGENTS_MD: &str = "AGENTS.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
 
@@ -842,13 +841,11 @@ pub fn uninstall(
 
 fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if !global {
-        anyhow::bail!(
-            "Uninstall only works with --global flag. For local projects, manually remove RTK from AGENTS.md"
-        );
-    }
-
-    let codex_dir = resolve_codex_dir()?;
+    let codex_dir = if global {
+        resolve_codex_dir()?
+    } else {
+        PathBuf::from(CODEX_DIR)
+    };
     let removed = uninstall_codex_at(&codex_dir, ctx)?;
 
     if removed.is_empty() {
@@ -869,56 +866,7 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
 }
 
 fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
     let mut removed = Vec::new();
-    let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
-
-    let rtk_md_path = codex_dir.join(RTK_MD);
-    if rtk_md_path.exists() {
-        if dry_run {
-            println!("[dry-run] would remove RTK.md: {}", rtk_md_path.display());
-        } else {
-            fs::remove_file(&rtk_md_path)
-                .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
-            if verbose > 0 {
-                eprintln!("Removed RTK.md: {}", rtk_md_path.display());
-            }
-        }
-        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
-    }
-
-    let agents_md_path = codex_dir.join(AGENTS_MD);
-    if agents_md_path.exists() {
-        let content = fs::read_to_string(&agents_md_path)
-            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
-
-        let mut working_content = content.clone();
-        let mut agents_changed = false;
-
-        if working_content.contains(RTK_BLOCK_START) {
-            let (cleaned, did_remove) = remove_rtk_block(&working_content);
-            if did_remove {
-                working_content = cleaned;
-                agents_changed = true;
-                removed.push("AGENTS.md: removed rtk-instructions block".to_string());
-            }
-        }
-
-        if agents_changed {
-            atomic_write(&agents_md_path, &working_content).with_context(|| {
-                format!("Failed to write AGENTS.md: {}", agents_md_path.display())
-            })?;
-        }
-    }
-
-    if remove_rtk_reference_from_agents(
-        &agents_md_path,
-        &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
-        ctx,
-    )? {
-        removed.push("AGENTS.md: removed @RTK.md reference".to_string());
-    }
-
     let hooks_json_path = codex_dir.join(HOOKS_JSON);
     if remove_codex_hook_from_file(&hooks_json_path, ctx)? {
         removed.push("hooks.json: removed RTK Codex hook".to_string());
@@ -2703,59 +2651,6 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
     Ok(migrated)
 }
 
-fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
-    content
-        .lines()
-        .map(str::trim)
-        .any(|line| refs.contains(&line))
-}
-
-fn remove_rtk_reference_from_agents(path: &Path, refs: &[&str], ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
-    if !path.exists() {
-        return Ok(false);
-    }
-
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read AGENTS.md: {}", path.display()))?;
-    if !has_rtk_reference(&content, refs) {
-        return Ok(false);
-    }
-
-    let new_content = content
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !refs.contains(&trimmed)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let cleaned = clean_double_blanks(&new_content);
-
-    if dry_run {
-        println!(
-            "[dry-run] would remove RTK.md reference from AGENTS.md: {}",
-            path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", cleaned);
-        }
-        return Ok(true);
-    }
-
-    atomic_write(path, &cleaned)
-        .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
-
-    if verbose > 0 {
-        eprintln!(
-            "Removed RTK.md reference from AGENTS.md: {}",
-            path.display()
-        );
-    }
-
-    Ok(true)
-}
-
 /// Remove old RTK block from CLAUDE.md (migration helper)
 fn remove_rtk_block(content: &str) -> (String, bool) {
     if let (Some(start), Some(end)) = (content.find(RTK_BLOCK_START), content.find(RTK_BLOCK_END)) {
@@ -2857,10 +2752,6 @@ fn resolve_hermes_home_from_env(
     home_dir
         .map(|home| home.join(HERMES_DIR))
         .context("Cannot determine Hermes home directory. Set $HERMES_HOME or $HOME.")
-}
-
-fn codex_rtk_md_ref(codex_dir: &Path) -> String {
-    format!("@{}", codex_dir.join(RTK_MD).display())
 }
 
 fn resolve_opencode_dir() -> Result<PathBuf> {
@@ -3602,8 +3493,10 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
-    println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!("  rtk init --codex            # Configure local .codex/hooks.json");
+    println!(
+        "  rtk init -g --codex         # Configure $CODEX_HOME/hooks.json (or ~/.codex/hooks.json)"
+    );
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
@@ -3612,56 +3505,56 @@ fn show_claude_config() -> Result<()> {
 
 fn show_codex_config() -> Result<()> {
     let codex_dir = resolve_codex_dir()?;
-    let global_agents_md = codex_dir.join(AGENTS_MD);
-    let global_rtk_md = codex_dir.join(RTK_MD);
-    let global_rtk_md_ref = codex_rtk_md_ref(&codex_dir);
-    let local_agents_md = PathBuf::from(AGENTS_MD);
-    let local_rtk_md = PathBuf::from(RTK_MD);
+    let global_hooks_json = codex_dir.join(HOOKS_JSON);
+    let local_hooks_json = PathBuf::from(CODEX_DIR).join(HOOKS_JSON);
 
     println!("rtk Configuration (Codex CLI):\n");
 
-    if global_rtk_md.exists() {
-        println!("[ok] Global RTK.md: {}", global_rtk_md.display());
-    } else {
-        println!("[--] Global RTK.md: not found");
+    match which::which("rtk") {
+        Ok(path) => println!("[ok] rtk binary: {}", path.display()),
+        Err(_) => println!("[!!] rtk binary: not found on PATH"),
     }
 
-    if global_agents_md.exists() {
-        let content = fs::read_to_string(&global_agents_md)?;
-        if has_rtk_reference(&content, &[RTK_MD_REF, global_rtk_md_ref.as_str()]) {
-            println!("[ok] Global AGENTS.md: RTK.md reference");
-        } else if content.contains(RTK_BLOCK_START) {
-            println!("[!!] Global AGENTS.md: old inline RTK block");
-        } else {
-            println!("[--] Global AGENTS.md: exists but rtk not configured");
-        }
-    } else {
-        println!("[--] Global AGENTS.md: not found");
-    }
-
-    if local_rtk_md.exists() {
-        println!("[ok] Local RTK.md: {}", local_rtk_md.display());
-    } else {
-        println!("[--] Local RTK.md: not found");
-    }
-
-    if local_agents_md.exists() {
-        let content = fs::read_to_string(&local_agents_md)?;
-        if has_rtk_reference(&content, &[RTK_MD_REF]) {
-            println!("[ok] Local AGENTS.md: @RTK.md reference");
-        } else if content.contains(RTK_BLOCK_START) {
-            println!("[!!] Local AGENTS.md: old inline RTK block");
-        } else {
-            println!("[--] Local AGENTS.md: exists but rtk not configured");
-        }
-    } else {
-        println!("[--] Local AGENTS.md: not found");
-    }
+    print_codex_hooks_status("Global hooks.json", &global_hooks_json)?;
+    print_codex_hooks_status("Local hooks.json", &local_hooks_json)?;
 
     println!("\nUsage:");
-    println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
-    println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
+    println!("  rtk init --codex                  # Configure local .codex/hooks.json");
+    println!("  rtk init -g --codex               # Configure $CODEX_HOME/hooks.json (or ~/.codex/hooks.json)");
+    println!("  rtk init --codex --uninstall      # Remove local Codex hook");
+    println!("  rtk init -g --codex --uninstall   # Remove global Codex hook");
+
+    Ok(())
+}
+
+fn print_codex_hooks_status(label: &str, path: &Path) -> Result<()> {
+    if !path.exists() {
+        println!("[--] {}: not found ({})", label, path.display());
+        return Ok(());
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        println!("[--] {}: empty ({})", label, path.display());
+        return Ok(());
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(root) if codex_hook_already_present(&root) => {
+            println!("[ok] {}: RTK hook configured ({})", label, path.display());
+        }
+        Ok(_) => {
+            println!(
+                "[--] {}: exists but RTK hook not configured ({})",
+                label,
+                path.display()
+            );
+        }
+        Err(_) => {
+            println!("[!!] {}: invalid JSON ({})", label, path.display());
+        }
+    }
 
     Ok(())
 }
@@ -5156,43 +5049,45 @@ mod tests {
     }
 
     #[test]
-    fn test_uninstall_codex_at_is_idempotent() {
+    fn test_uninstall_codex_at_only_removes_hooks_json() {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
         let rtk_md = codex_dir.join("RTK.md");
+        let hooks_json = codex_dir.join("hooks.json");
 
         fs::write(&agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
         fs::write(&rtk_md, "codex config").unwrap();
+        patch_codex_hooks_json(&hooks_json, PatchMode::Auto, InitContext::default()).unwrap();
 
         let removed_first = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
         let removed_second = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
-        assert_eq!(removed_first.len(), 2);
+        assert_eq!(removed_first, vec!["hooks.json: removed RTK Codex hook"]);
         assert!(removed_second.is_empty());
-        assert!(!rtk_md.exists());
+        assert!(rtk_md.exists());
 
         let content = fs::read_to_string(&agents_md).unwrap();
-        assert!(!content.contains("@RTK.md"));
+        assert!(content.contains("@RTK.md"));
         assert!(content.contains("# Team rules"));
     }
 
     #[test]
-    fn test_uninstall_codex_at_removes_absolute_reference() {
+    fn test_uninstall_codex_at_preserves_instruction_files_without_hook() {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
         let rtk_md = codex_dir.join("RTK.md");
-        let absolute_ref = codex_rtk_md_ref(codex_dir);
 
-        fs::write(&agents_md, format!("# Team rules\n\n{}\n", absolute_ref)).unwrap();
+        fs::write(&agents_md, "# Team rules\n\n@/tmp/codex/RTK.md\n").unwrap();
         fs::write(&rtk_md, "codex config").unwrap();
 
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
-        assert_eq!(removed.len(), 2);
+        assert!(removed.is_empty());
+        assert!(rtk_md.exists());
         let content = fs::read_to_string(&agents_md).unwrap();
-        assert!(!content.contains(&absolute_ref));
+        assert!(content.contains("@/tmp/codex/RTK.md"));
         assert!(content.contains("# Team rules"));
     }
 
@@ -5283,7 +5178,7 @@ mod tests {
     }
 
     #[test]
-    fn test_uninstall_codex_at_removes_rtk_instructions_block() {
+    fn test_uninstall_codex_at_preserves_rtk_instructions_block() {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
@@ -5302,10 +5197,10 @@ mod tests {
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
         let content = fs::read_to_string(&agents_md).unwrap();
-        assert!(!content.contains("OLD RTK STUFF"));
+        assert!(content.contains("OLD RTK STUFF"));
         assert!(content.contains("# Team rules"));
         assert!(content.contains("More content"));
-        assert!(removed.iter().any(|r| r.contains("rtk-instructions block")));
+        assert!(removed.is_empty());
     }
 
     #[test]
@@ -6311,7 +6206,7 @@ mod tests {
         with_pi_dir_override(&tmp, |pi_dir| {
             run_pi_mode(true, InitContext::default()).unwrap();
 
-            let agents_md = pi_dir.join(AGENTS_MD);
+            let agents_md = pi_dir.join("AGENTS.md");
             assert!(!agents_md.exists(), "AGENTS.md must not be created");
         });
     }
@@ -6339,7 +6234,7 @@ mod tests {
             "plugin must be written even when dir was absent"
         );
 
-        let agents_md = absent_dir.join(AGENTS_MD);
+        let agents_md = absent_dir.join("AGENTS.md");
         assert!(!agents_md.exists(), "AGENTS.md must not be created");
     }
 
