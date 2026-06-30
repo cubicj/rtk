@@ -371,7 +371,7 @@ enum Commands {
         #[arg(long)]
         uninstall: bool,
 
-        /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
+        /// Target Codex CLI (uses hooks.json)
         #[arg(long)]
         codex: bool,
 
@@ -781,6 +781,8 @@ enum HookCommands {
     Claude,
     /// Process Cursor Agent hook (reads JSON from stdin)
     Cursor,
+    /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
+    Codex,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
@@ -2273,6 +2275,10 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_cursor()?;
                 0
             }
+            HookCommands::Codex => {
+                hooks::hook_cmd::run_codex()?;
+                0
+            }
             HookCommands::Gemini => {
                 hooks::hook_cmd::run_gemini()?;
                 0
@@ -3029,6 +3035,11 @@ mod tests {
                 command: HookCommands::Claude
             }
         ));
+    }
+
+    #[test]
+    fn test_hook_codex_parses() {
+        assert!(Cli::try_parse_from(["rtk", "hook", "codex"]).is_ok());
     }
 
     #[test]

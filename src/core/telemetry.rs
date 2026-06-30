@@ -3,7 +3,7 @@
 use super::constants::RTK_DATA_DIR;
 use crate::core::config;
 use crate::core::tracking;
-use crate::hooks::constants::CLAUDE_DIR;
+use crate::hooks::constants::{CLAUDE_DIR, CODEX_HOOK_COMMAND, HOOKS_JSON, PRE_TOOL_USE_KEY};
 use crate::hooks::init::resolve_claude_dir;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
@@ -362,12 +362,16 @@ fn detect_hook_type() -> String {
         (claude_dir.join("hooks/rtk-rewrite.sh"), "claude"),
         (claude_dir.join("hooks/rtk-rewrite.json"), "claude"),
         (home.join(".gemini/hooks/rtk-hook.sh"), "gemini"),
-        (home.join(".codex/AGENTS.md"), "codex"),
+        (home.join(".codex").join(HOOKS_JSON), "codex"),
         (home.join(".cursor/hooks/rtk-rewrite.json"), "cursor"),
     ];
 
     for (path, name) in &checks {
-        if path.exists() {
+        if *name == "codex" {
+            if codex_hook_registered(path) {
+                return name.to_string();
+            }
+        } else if path.exists() {
             return name.to_string();
         }
     }
@@ -383,6 +387,29 @@ fn detect_hook_type() -> String {
     }
 
     "none".to_string()
+}
+
+fn codex_hook_registered(path: &std::path::Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    root.get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("hooks")?.as_array())
+                .flatten()
+                .any(|hook| {
+                    hook.get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|cmd| cmd == CODEX_HOOK_COMMAND)
+                })
+        })
 }
 
 /// Count user-defined TOML filter files (project-local + global).

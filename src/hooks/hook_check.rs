@@ -151,9 +151,9 @@ fn warn_marker_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::hooks::constants::{
-        CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+        CODEX_DIR, CODEX_HOOK_COMMAND, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE,
+        HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
+        HOOKS_JSON, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
     };
 
     fn other_integration_installed(home: &std::path::Path) -> bool {
@@ -165,7 +165,7 @@ mod tests {
             home.join(CURSOR_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(REWRITE_HOOK_FILE),
-            home.join(CODEX_DIR).join("AGENTS.md"),
+            home.join(CODEX_DIR).join(HOOKS_JSON),
             home.join(GEMINI_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(GEMINI_HOOK_FILE),
@@ -247,9 +247,21 @@ mod tests {
     #[test]
     fn test_other_integration_codex() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
+        let path = tmp.path().join(CODEX_DIR).join(HOOKS_JSON);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"agents").unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": CODEX_HOOK_COMMAND }]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
         assert!(other_integration_installed(tmp.path()));
     }
 
