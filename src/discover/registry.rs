@@ -1033,6 +1033,10 @@ fn rewrite_segment_inner(
         }
     }
 
+    if find_has_unsupported_gnu_construct(cmd_part) {
+        return None;
+    }
+
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
@@ -1133,6 +1137,27 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+/// Native find constructs `rtk find` cannot execute (compound predicates,
+/// actions, formatted output). Rewriting these would turn a working command
+/// into an error or silently wrong output, so the hook must pass them through.
+const UNSUPPORTED_FIND_REWRITE_TOKENS: &[&str] = &[
+    "\\(", "\\)", "(", ")", "-o", "-or", "-a", "-and", "-not", "!", "-exec", "-execdir", "-ok",
+    "-okdir", "-delete", "-printf", "-print0", "-prune", "-newer", "-perm", "-size", "-mtime",
+    "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-empty", "-link", "-regex", "-iregex",
+];
+
+fn find_has_unsupported_gnu_construct(cmd: &str) -> bool {
+    let Some(rest) = strip_word_prefix(cmd, "find") else {
+        return false;
+    };
+
+    tokenize(rest).iter().any(|token| {
+        UNSUPPORTED_FIND_REWRITE_TOKENS
+            .iter()
+            .any(|unsupported| token.value == *unsupported)
+    })
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -1948,6 +1973,25 @@ mod tests {
         // is incompatible with pipe consumers like xargs (#439)
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs' | xargs grep 'fn run'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_compound_predicate_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r"find /mnt/c/Dev/Risuai -maxdepth 1 \( -name .agents -o -name Docs -o -name scripts -o -name AGENTS.override.md \) -printf '%M %u %g %s %TY-%Tm-%Td %TH:%TM %p\n'",
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_exec_action_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find .agents Docs -type d -exec chmod 755 {} +", &[]),
             None
         );
     }

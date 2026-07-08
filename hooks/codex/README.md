@@ -4,6 +4,7 @@
 
 ## Specifics
 
-- Prompt-level guidance via awareness document -- no programmatic hook
-- `rtk-awareness.md` is injected into `AGENTS.md` with an `@RTK.md` reference
-- Installed to `$CODEX_HOME` when set, otherwise `~/.codex/`, by `rtk init --codex`
+- Programmatic PreToolUse hook: `rtk hook codex` reads the hook payload from stdin and rewrites Bash commands to their `rtk` equivalents via `updatedInput`
+- `rtk init --codex` registers the hook in `hooks.json` (`$CODEX_HOME/hooks.json` when set, otherwise `~/.codex/hooks.json`)
+- The hook entry carries both `command` (POSIX) and `commandWindows` (`rtk.exe`) so one config works across platforms
+- `rtk-awareness.md` is the legacy prompt-level guidance document, no longer installed by `rtk init --codex`

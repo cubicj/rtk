@@ -13,12 +13,13 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CODEX_HOOK_COMMAND,
+    CODEX_HOOK_COMMAND_WINDOWS, CURSOR_HOOK_COMMAND, DROID_DIR, DROID_EXECUTE_MATCHER,
+    DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE,
+    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -31,7 +32,6 @@ const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
-const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -65,8 +65,8 @@ schema_version = 1
 "#;
 
 const RTK_MD: &str = "RTK.md";
-const CLAUDE_MD: &str = "CLAUDE.md";
 const AGENTS_MD: &str = "AGENTS.md";
+const CLAUDE_MD: &str = "CLAUDE.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
 
@@ -284,13 +284,7 @@ pub fn run(
         if hook_only {
             anyhow::bail!("--codex cannot be combined with --hook-only");
         }
-        if matches!(patch_mode, PatchMode::Auto) {
-            anyhow::bail!("--codex cannot be combined with --auto-patch");
-        }
-        if matches!(patch_mode, PatchMode::Skip) {
-            anyhow::bail!("--codex cannot be combined with --no-patch");
-        }
-        run_codex_mode(global, ctx)?;
+        run_codex_mode(global, patch_mode, ctx)?;
     } else {
         // Validation: Global-only features
         if install_opencode && !global {
@@ -869,13 +863,11 @@ pub fn uninstall(
 
 fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if !global {
-        anyhow::bail!(
-            "Uninstall only works with --global flag. For local projects, manually remove RTK from AGENTS.md"
-        );
-    }
-
-    let codex_dir = resolve_codex_dir()?;
+    let codex_dir = if global {
+        resolve_codex_dir()?
+    } else {
+        PathBuf::from(CODEX_DIR)
+    };
     let removed = uninstall_codex_at(&codex_dir, ctx)?;
 
     if removed.is_empty() {
@@ -896,54 +888,10 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
 }
 
 fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
     let mut removed = Vec::new();
-    let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
-
-    let rtk_md_path = codex_dir.join(RTK_MD);
-    if rtk_md_path.exists() {
-        if dry_run {
-            println!("[dry-run] would remove RTK.md: {}", rtk_md_path.display());
-        } else {
-            fs::remove_file(&rtk_md_path)
-                .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
-            if verbose > 0 {
-                eprintln!("Removed RTK.md: {}", rtk_md_path.display());
-            }
-        }
-        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
-    }
-
-    let agents_md_path = codex_dir.join(AGENTS_MD);
-    if agents_md_path.exists() {
-        let content = fs::read_to_string(&agents_md_path)
-            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
-
-        let mut working_content = content.clone();
-        let mut agents_changed = false;
-
-        if working_content.contains(RTK_BLOCK_START) {
-            let (cleaned, did_remove) = remove_rtk_block(&working_content);
-            if did_remove {
-                working_content = cleaned;
-                agents_changed = true;
-                removed.push("AGENTS.md: removed rtk-instructions block".to_string());
-            }
-        }
-
-        if agents_changed {
-            atomic_write(&agents_md_path, &working_content).with_context(|| {
-                format!("Failed to write AGENTS.md: {}", agents_md_path.display())
-            })?;
-        }
-    }
-
-    if remove_rtk_reference_from_agents(
-        &agents_md_path,
-        &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
-        ctx,
-    )? {
-        removed.push("AGENTS.md: removed @RTK.md reference".to_string());
+    let hooks_json_path = codex_dir.join(HOOKS_JSON);
+    if remove_codex_hook_from_file(&hooks_json_path, ctx)? {
+        removed.push("hooks.json: removed RTK Codex hook".to_string());
     }
 
     Ok(removed)
@@ -1135,6 +1083,227 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .any(|cmd| {
             cmd == hook_command || is_claude_hook_command(cmd) || cmd.contains(REWRITE_HOOK_FILE)
         })
+}
+
+fn patch_codex_hooks_json(path: &Path, mode: PatchMode, ctx: InitContext) -> Result<PatchResult> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut root = if path.exists() {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    if codex_hook_already_present(&root) {
+        if verbose > 0 {
+            eprintln!("hooks.json: Codex hook already present");
+        }
+        return Ok(PatchResult::AlreadyPresent);
+    }
+
+    match mode {
+        PatchMode::Skip => {
+            print_codex_manual_instructions(path);
+            return Ok(PatchResult::Skipped);
+        }
+        PatchMode::Ask => {
+            if dry_run {
+                println!("[dry-run] would prompt before patching {}", path.display());
+            } else if !prompt_user_consent(path)? {
+                print_codex_manual_instructions(path);
+                return Ok(PatchResult::Declined);
+            }
+        }
+        PatchMode::Auto => {}
+    }
+
+    insert_codex_hook_entry(&mut root)?;
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
+
+    if dry_run {
+        println!("[dry-run] would patch Codex hooks.json: {}", path.display());
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(PatchResult::WouldPatch);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+
+    if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        fs::copy(path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Backup: {}", backup_path.display());
+        }
+    }
+
+    atomic_write(path, &serialized)?;
+
+    Ok(PatchResult::Patched)
+}
+
+fn print_codex_manual_instructions(path: &Path) {
+    println!("\n  MANUAL STEP: Add this to {}:", path.display());
+    println!("  {{");
+    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
+    println!("      \"matcher\": \"Bash\",");
+    println!("      \"hooks\": [{{ \"type\": \"command\",");
+    println!("        \"command\": \"{}\",", CODEX_HOOK_COMMAND);
+    println!(
+        "        \"commandWindows\": \"{}\"",
+        CODEX_HOOK_COMMAND_WINDOWS
+    );
+    println!("      }}]");
+    println!("    }}]}}");
+    println!("  }}");
+    println!("\n  Then restart Codex CLI. Test with: git status\n");
+}
+
+pub(crate) fn codex_hook_already_present(root: &serde_json::Value) -> bool {
+    let pre_tool_use_array = match root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    pre_tool_use_array
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .any(codex_hook_matches)
+}
+
+fn codex_hook_matches(hook: &serde_json::Value) -> bool {
+    hook.get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(is_codex_hook_command)
+        || hook
+            .get("commandWindows")
+            .and_then(|c| c.as_str())
+            .is_some_and(is_codex_hook_command)
+}
+
+/// Matches both the bare hook commands and variants invoked through an
+/// absolute binary path (e.g. `/home/user/.cargo/bin/rtk hook codex`,
+/// `C:\Users\user\.cargo\bin\rtk.exe hook codex`).
+fn is_codex_hook_command(cmd: &str) -> bool {
+    [CODEX_HOOK_COMMAND, CODEX_HOOK_COMMAND_WINDOWS]
+        .iter()
+        .any(|suffix| {
+            cmd == *suffix
+                || cmd
+                    .strip_suffix(suffix)
+                    .is_some_and(|prefix| prefix.ends_with('/') || prefix.ends_with('\\'))
+        })
+}
+
+fn insert_codex_hook_entry(root: &mut serde_json::Value) -> Result<()> {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut().expect("just-created json object")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks value is not an object")?;
+
+    let pre_tool_use = hooks
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("PreToolUse value is not an array")?;
+
+    pre_tool_use.push(serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": CODEX_HOOK_COMMAND,
+            "commandWindows": CODEX_HOOK_COMMAND_WINDOWS,
+            "statusMessage": "RTK is rewriting a Bash command for token-optimized output",
+            "timeout": 30
+        }]
+    }));
+    Ok(())
+}
+
+fn remove_codex_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let pre_tool_use = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let original_len = pre_tool_use.len();
+    pre_tool_use.retain(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|hooks| hooks.as_array())
+            .is_none_or(|hooks| !hooks.iter().any(codex_hook_matches))
+    });
+    pre_tool_use.len() < original_len
+}
+
+fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let mut root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as JSON", path.display()))?;
+
+    if !remove_codex_hook_from_json(&mut root) {
+        return Ok(false);
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK Codex hook from {}",
+            path.display()
+        );
+        return Ok(true);
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
+    atomic_write(path, &serialized)?;
+
+    if verbose > 0 {
+        eprintln!("Removed RTK Codex hook from {}", path.display());
+    }
+
+    Ok(true)
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
@@ -2369,69 +2538,32 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
-    let (agents_md_path, rtk_md_path) = if global {
+fn run_codex_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
+    let hooks_json_path = if global {
         let codex_dir = resolve_codex_dir()?;
-        (codex_dir.join(AGENTS_MD), codex_dir.join(RTK_MD))
+        codex_dir.join(HOOKS_JSON)
     } else {
-        (PathBuf::from(AGENTS_MD), PathBuf::from(RTK_MD))
+        PathBuf::from(CODEX_DIR).join(HOOKS_JSON)
     };
 
-    run_codex_mode_with_paths(agents_md_path, rtk_md_path, global, ctx)
+    run_codex_mode_with_paths(hooks_json_path, patch_mode, ctx)
 }
 
 fn run_codex_mode_with_paths(
-    agents_md_path: PathBuf,
-    rtk_md_path: PathBuf,
-    global: bool,
+    hooks_json_path: PathBuf,
+    patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if global && !dry_run {
-        if let Some(parent) = agents_md_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create Codex config directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
-    }
-
-    // ISSUE #892: In global mode, use absolute path so @RTK.md resolves
-    // from any CWD (worktrees, nested projects). Codex resolves @ references
-    // relative to CWD, not the AGENTS.md file location.
-    let rtk_md_ref = if global {
-        codex_rtk_md_ref(
-            rtk_md_path
-                .parent()
-                .context("RTK.md path missing parent directory")?,
-        )
-    } else {
-        RTK_MD_REF.to_string()
-    };
-
-    write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, RTK_MD, ctx)?;
-    let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
+    let patch_result = patch_codex_hooks_json(&hooks_json_path, patch_mode, ctx)?;
 
     if !dry_run {
         println!("\nRTK configured for Codex CLI.\n");
-        println!("  RTK.md:    {}", rtk_md_path.display());
-        if added_ref {
-            println!("  AGENTS.md: {} reference added", rtk_md_ref);
-        } else {
-            println!("  AGENTS.md: {} reference already present", rtk_md_ref);
-        }
-        if global {
-            println!(
-                "\n  Codex global instructions path: {}",
-                agents_md_path.display()
-            );
-        } else {
-            println!(
-                "\n  Codex project instructions path: {}",
-                agents_md_path.display()
-            );
+        match patch_result {
+            PatchResult::Patched => println!("  hooks.json: hook added"),
+            PatchResult::AlreadyPresent => println!("  hooks.json: hook already present"),
+            PatchResult::Declined | PatchResult::Skipped => {}
+            PatchResult::WouldPatch => {}
         }
     }
 
@@ -2647,146 +2779,6 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
     Ok(migrated)
 }
 
-/// Patch AGENTS.md: add @RTK.md (or absolute path), migrate old inline block if present
-fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
-    let mut content = if path.exists() {
-        fs::read_to_string(path)
-            .with_context(|| format!("Failed to read AGENTS.md: {}", path.display()))?
-    } else {
-        String::new()
-    };
-
-    let mut migrated = false;
-    if content.contains(RTK_BLOCK_START) {
-        let (new_content, did_migrate) = remove_rtk_block(&content);
-        if did_migrate {
-            content = new_content;
-            migrated = true;
-            if verbose > 0 {
-                eprintln!("Migrated: removed old RTK block from AGENTS.md");
-            }
-        }
-    }
-
-    // ISSUE #892: Check for both relative and absolute @RTK.md references
-    if content.contains(RTK_MD_REF) || content.contains(rtk_md_ref) {
-        if verbose > 0 {
-            eprintln!("{} reference already present in AGENTS.md", rtk_md_ref);
-        }
-        // ISSUE #892: Migrate old relative @RTK.md to absolute path if needed
-        if rtk_md_ref != RTK_MD_REF && content.contains(RTK_MD_REF) && !content.contains(rtk_md_ref)
-        {
-            content = content.replace(RTK_MD_REF, rtk_md_ref);
-            if dry_run {
-                println!(
-                    "[dry-run] would migrate {} to {} in {}",
-                    RTK_MD_REF,
-                    rtk_md_ref,
-                    path.display()
-                );
-            } else {
-                atomic_write(path, &content)
-                    .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
-                if verbose > 0 {
-                    eprintln!("Migrated {} to {}", RTK_MD_REF, rtk_md_ref);
-                }
-            }
-            return Ok(true);
-        }
-        if migrated {
-            if dry_run {
-                println!(
-                    "[dry-run] would write migrated AGENTS.md: {}",
-                    path.display()
-                );
-            } else {
-                atomic_write(path, &content)
-                    .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
-            }
-        }
-        return Ok(false);
-    }
-
-    let new_content = if content.is_empty() {
-        format!("{}\n", rtk_md_ref)
-    } else {
-        format!("{}\n\n{}\n", content.trim(), rtk_md_ref)
-    };
-
-    if dry_run {
-        println!(
-            "[dry-run] would add {} reference to AGENTS.md: {}",
-            rtk_md_ref,
-            path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", new_content);
-        }
-    } else {
-        atomic_write(path, &new_content)
-            .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
-        if verbose > 0 {
-            eprintln!("Added {} reference to AGENTS.md", rtk_md_ref);
-        }
-    }
-
-    Ok(true)
-}
-
-fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
-    content
-        .lines()
-        .map(str::trim)
-        .any(|line| refs.contains(&line))
-}
-
-fn remove_rtk_reference_from_agents(path: &Path, refs: &[&str], ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
-    if !path.exists() {
-        return Ok(false);
-    }
-
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read AGENTS.md: {}", path.display()))?;
-    if !has_rtk_reference(&content, refs) {
-        return Ok(false);
-    }
-
-    let new_content = content
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !refs.contains(&trimmed)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let cleaned = clean_double_blanks(&new_content);
-
-    if dry_run {
-        println!(
-            "[dry-run] would remove RTK.md reference from AGENTS.md: {}",
-            path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", cleaned);
-        }
-        return Ok(true);
-    }
-
-    atomic_write(path, &cleaned)
-        .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
-
-    if verbose > 0 {
-        eprintln!(
-            "Removed RTK.md reference from AGENTS.md: {}",
-            path.display()
-        );
-    }
-
-    Ok(true)
-}
-
 /// Remove old RTK block from CLAUDE.md (migration helper)
 fn remove_rtk_block(content: &str) -> (String, bool) {
     if let (Some(start), Some(end)) = (content.find(RTK_BLOCK_START), content.find(RTK_BLOCK_END)) {
@@ -2853,7 +2845,7 @@ fn resolve_claude_dir_from(
         .context("Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.")
 }
 
-fn resolve_codex_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_codex_dir_from(
         std::env::var_os("CODEX_HOME").map(PathBuf::from),
         dirs::home_dir(),
@@ -3354,10 +3346,6 @@ fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout
     }
 
     modified
-}
-
-fn codex_rtk_md_ref(codex_dir: &Path) -> String {
-    format!("@{}", codex_dir.join(RTK_MD).display())
 }
 
 fn resolve_opencode_dir() -> Result<PathBuf> {
@@ -4099,8 +4087,10 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
-    println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!("  rtk init --codex            # Configure local .codex/hooks.json");
+    println!(
+        "  rtk init -g --codex         # Configure $CODEX_HOME/hooks.json (or ~/.codex/hooks.json)"
+    );
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
@@ -4109,56 +4099,56 @@ fn show_claude_config() -> Result<()> {
 
 fn show_codex_config() -> Result<()> {
     let codex_dir = resolve_codex_dir()?;
-    let global_agents_md = codex_dir.join(AGENTS_MD);
-    let global_rtk_md = codex_dir.join(RTK_MD);
-    let global_rtk_md_ref = codex_rtk_md_ref(&codex_dir);
-    let local_agents_md = PathBuf::from(AGENTS_MD);
-    let local_rtk_md = PathBuf::from(RTK_MD);
+    let global_hooks_json = codex_dir.join(HOOKS_JSON);
+    let local_hooks_json = PathBuf::from(CODEX_DIR).join(HOOKS_JSON);
 
     println!("rtk Configuration (Codex CLI):\n");
 
-    if global_rtk_md.exists() {
-        println!("[ok] Global RTK.md: {}", global_rtk_md.display());
-    } else {
-        println!("[--] Global RTK.md: not found");
+    match which::which("rtk") {
+        Ok(path) => println!("[ok] rtk binary: {}", path.display()),
+        Err(_) => println!("[!!] rtk binary: not found on PATH"),
     }
 
-    if global_agents_md.exists() {
-        let content = fs::read_to_string(&global_agents_md)?;
-        if has_rtk_reference(&content, &[RTK_MD_REF, global_rtk_md_ref.as_str()]) {
-            println!("[ok] Global AGENTS.md: RTK.md reference");
-        } else if content.contains(RTK_BLOCK_START) {
-            println!("[!!] Global AGENTS.md: old inline RTK block");
-        } else {
-            println!("[--] Global AGENTS.md: exists but rtk not configured");
-        }
-    } else {
-        println!("[--] Global AGENTS.md: not found");
-    }
-
-    if local_rtk_md.exists() {
-        println!("[ok] Local RTK.md: {}", local_rtk_md.display());
-    } else {
-        println!("[--] Local RTK.md: not found");
-    }
-
-    if local_agents_md.exists() {
-        let content = fs::read_to_string(&local_agents_md)?;
-        if has_rtk_reference(&content, &[RTK_MD_REF]) {
-            println!("[ok] Local AGENTS.md: @RTK.md reference");
-        } else if content.contains(RTK_BLOCK_START) {
-            println!("[!!] Local AGENTS.md: old inline RTK block");
-        } else {
-            println!("[--] Local AGENTS.md: exists but rtk not configured");
-        }
-    } else {
-        println!("[--] Local AGENTS.md: not found");
-    }
+    print_codex_hooks_status("Global hooks.json", &global_hooks_json)?;
+    print_codex_hooks_status("Local hooks.json", &local_hooks_json)?;
 
     println!("\nUsage:");
-    println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
-    println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
+    println!("  rtk init --codex                  # Configure local .codex/hooks.json");
+    println!("  rtk init -g --codex               # Configure $CODEX_HOME/hooks.json (or ~/.codex/hooks.json)");
+    println!("  rtk init --codex --uninstall      # Remove local Codex hook");
+    println!("  rtk init -g --codex --uninstall   # Remove global Codex hook");
+
+    Ok(())
+}
+
+fn print_codex_hooks_status(label: &str, path: &Path) -> Result<()> {
+    if !path.exists() {
+        println!("[--] {}: not found ({})", label, path.display());
+        return Ok(());
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        println!("[--] {}: empty ({})", label, path.display());
+        return Ok(());
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(root) if codex_hook_already_present(&root) => {
+            println!("[ok] {}: RTK hook configured ({})", label, path.display());
+        }
+        Ok(_) => {
+            println!(
+                "[--] {}: exists but RTK hook not configured ({})",
+                label,
+                path.display()
+            );
+        }
+        Err(_) => {
+            println!("[!!] {}: invalid JSON ({})", label, path.display());
+        }
+    }
 
     Ok(())
 }
@@ -4938,63 +4928,88 @@ mod tests {
     }
 
     #[test]
-    fn test_patch_agents_md_adds_reference_once() {
+    fn test_codex_mode_accepts_auto_patch() {
         let temp = TempDir::new().unwrap();
-        let agents_md = temp.path().join("AGENTS.md");
+        let hooks_json = temp.path().join("hooks.json");
 
-        fs::write(&agents_md, "# Team rules\n").unwrap();
-        let first_added = patch_agents_md(&agents_md, RTK_MD_REF, InitContext::default()).unwrap();
-        let second_added = patch_agents_md(&agents_md, RTK_MD_REF, InitContext::default()).unwrap();
+        run_codex_mode_with_paths(hooks_json.clone(), PatchMode::Auto, InitContext::default())
+            .unwrap();
 
-        assert!(first_added);
-        assert!(!second_added);
-
-        let content = fs::read_to_string(&agents_md).unwrap();
-        assert_eq!(content.matches("@RTK.md").count(), 1);
+        let content = fs::read_to_string(&hooks_json).unwrap();
+        assert!(content.contains(CODEX_HOOK_COMMAND));
+        assert!(content.contains(CODEX_HOOK_COMMAND_WINDOWS));
     }
 
     #[test]
-    fn test_codex_mode_rejects_auto_patch() {
-        let err = run(
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            true,
-            PatchMode::Auto,
-            InitContext::default(),
-        )
-        .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "--codex cannot be combined with --auto-patch"
-        );
+    fn test_codex_mode_accepts_no_patch() {
+        let temp = TempDir::new().unwrap();
+        let hooks_json = temp.path().join("hooks.json");
+
+        run_codex_mode_with_paths(hooks_json.clone(), PatchMode::Skip, InitContext::default())
+            .unwrap();
+
+        assert!(!hooks_json.exists());
     }
 
     #[test]
-    fn test_codex_mode_rejects_no_patch() {
-        let err = run(
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            true,
-            PatchMode::Skip,
-            InitContext::default(),
-        )
-        .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "--codex cannot be combined with --no-patch"
-        );
+    fn test_insert_codex_hook_entry_preserves_existing_hooks() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Read",
+                    "hooks": [{ "type": "command", "command": "echo read" }]
+                }]
+            }
+        });
+
+        insert_codex_hook_entry(&mut root).unwrap();
+
+        let entries = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let codex_hook = &entries[1]["hooks"][0];
+        assert_eq!(codex_hook["command"], CODEX_HOOK_COMMAND);
+        assert_eq!(codex_hook["commandWindows"], CODEX_HOOK_COMMAND_WINDOWS);
+    }
+
+    #[test]
+    fn test_codex_hook_already_present_matches_windows_command() {
+        let root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": CODEX_HOOK_COMMAND,
+                        "commandWindows": CODEX_HOOK_COMMAND_WINDOWS
+                    }]
+                }]
+            }
+        });
+
+        assert!(codex_hook_already_present(&root));
+    }
+
+    #[test]
+    fn test_remove_codex_hook_from_json_leaves_other_hooks() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": CODEX_HOOK_COMMAND }]
+                    },
+                    {
+                        "matcher": "Read",
+                        "hooks": [{ "type": "command", "command": "echo read" }]
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_codex_hook_from_json(&mut root));
+        let entries = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["matcher"], "Read");
     }
 
     #[test]
@@ -5078,39 +5093,6 @@ mod tests {
         run_kimi_mode_at(temp.path(), InitContext::default()).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
-    }
-
-    #[test]
-    fn test_patch_agents_md_creates_missing_file() {
-        let temp = TempDir::new().unwrap();
-        let agents_md = temp.path().join("AGENTS.md");
-
-        let added = patch_agents_md(&agents_md, RTK_MD_REF, InitContext::default()).unwrap();
-
-        assert!(added);
-        let content = fs::read_to_string(&agents_md).unwrap();
-        assert_eq!(content, "@RTK.md\n");
-    }
-
-    #[test]
-    fn test_patch_agents_md_migrates_inline_block() {
-        let temp = TempDir::new().unwrap();
-        let agents_md = temp.path().join("AGENTS.md");
-        fs::write(
-            &agents_md,
-            format!(
-                "# Team rules\n\n{} v2 -->\nold\n{}\n",
-                RTK_BLOCK_START, RTK_BLOCK_END
-            ),
-        )
-        .unwrap();
-
-        let added = patch_agents_md(&agents_md, RTK_MD_REF, InitContext::default()).unwrap();
-
-        assert!(added);
-        let content = fs::read_to_string(&agents_md).unwrap();
-        assert!(!content.contains("old"));
-        assert_eq!(content.matches("@RTK.md").count(), 1);
     }
 
     #[test]
@@ -5598,25 +5580,20 @@ mod tests {
     }
 
     #[test]
-    fn test_run_codex_mode_global_writes_absolute_reference_to_codex_dir() {
+    fn test_run_codex_mode_global_installs_hook_without_instruction_files() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
         let rtk_md = temp.path().join("RTK.md");
+        let hooks_json = temp.path().join("hooks.json");
 
-        run_codex_mode_with_paths(
-            agents_md.clone(),
-            rtk_md.clone(),
-            true,
-            InitContext::default(),
-        )
-        .unwrap();
+        run_codex_mode_with_paths(hooks_json.clone(), PatchMode::Auto, InitContext::default())
+            .unwrap();
 
-        assert!(rtk_md.exists());
-        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_SLIM_CODEX);
-        assert_eq!(
-            fs::read_to_string(&agents_md).unwrap(),
-            format!("{}\n", codex_rtk_md_ref(temp.path()))
-        );
+        assert!(!rtk_md.exists());
+        assert!(!agents_md.exists());
+        let content = fs::read_to_string(&hooks_json).unwrap();
+        assert!(content.contains(CODEX_HOOK_COMMAND));
+        assert!(content.contains(CODEX_HOOK_COMMAND_WINDOWS));
     }
 
     #[test]
@@ -5993,43 +5970,45 @@ mod tests {
     }
 
     #[test]
-    fn test_uninstall_codex_at_is_idempotent() {
+    fn test_uninstall_codex_at_only_removes_hooks_json() {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
         let rtk_md = codex_dir.join("RTK.md");
+        let hooks_json = codex_dir.join("hooks.json");
 
         fs::write(&agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
         fs::write(&rtk_md, "codex config").unwrap();
+        patch_codex_hooks_json(&hooks_json, PatchMode::Auto, InitContext::default()).unwrap();
 
         let removed_first = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
         let removed_second = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
-        assert_eq!(removed_first.len(), 2);
+        assert_eq!(removed_first, vec!["hooks.json: removed RTK Codex hook"]);
         assert!(removed_second.is_empty());
-        assert!(!rtk_md.exists());
+        assert!(rtk_md.exists());
 
         let content = fs::read_to_string(&agents_md).unwrap();
-        assert!(!content.contains("@RTK.md"));
+        assert!(content.contains("@RTK.md"));
         assert!(content.contains("# Team rules"));
     }
 
     #[test]
-    fn test_uninstall_codex_at_removes_absolute_reference() {
+    fn test_uninstall_codex_at_preserves_instruction_files_without_hook() {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
         let rtk_md = codex_dir.join("RTK.md");
-        let absolute_ref = codex_rtk_md_ref(codex_dir);
 
-        fs::write(&agents_md, format!("# Team rules\n\n{}\n", absolute_ref)).unwrap();
+        fs::write(&agents_md, "# Team rules\n\n@/tmp/codex/RTK.md\n").unwrap();
         fs::write(&rtk_md, "codex config").unwrap();
 
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
-        assert_eq!(removed.len(), 2);
+        assert!(removed.is_empty());
+        assert!(rtk_md.exists());
         let content = fs::read_to_string(&agents_md).unwrap();
-        assert!(!content.contains(&absolute_ref));
+        assert!(content.contains("@/tmp/codex/RTK.md"));
         assert!(content.contains("# Team rules"));
     }
 
@@ -6090,11 +6069,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
         let rtk_md = temp.path().join("RTK.md");
+        let hooks_json = temp.path().join("hooks.json");
 
         run_codex_mode_with_paths(
-            agents_md.clone(),
-            rtk_md.clone(),
-            true,
+            hooks_json.clone(),
+            PatchMode::Auto,
             InitContext {
                 dry_run: true,
                 ..Default::default()
@@ -6112,10 +6091,15 @@ mod tests {
             "dry-run must not create AGENTS.md: {}",
             agents_md.display()
         );
+        assert!(
+            !hooks_json.exists(),
+            "dry-run must not create hooks.json: {}",
+            hooks_json.display()
+        );
     }
 
     #[test]
-    fn test_uninstall_codex_at_removes_rtk_instructions_block() {
+    fn test_uninstall_codex_at_preserves_rtk_instructions_block() {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
@@ -6134,10 +6118,10 @@ mod tests {
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
         let content = fs::read_to_string(&agents_md).unwrap();
-        assert!(!content.contains("OLD RTK STUFF"));
+        assert!(content.contains("OLD RTK STUFF"));
         assert!(content.contains("# Team rules"));
         assert!(content.contains("More content"));
-        assert!(removed.iter().any(|r| r.contains("rtk-instructions block")));
+        assert!(removed.is_empty());
     }
 
     #[test]
@@ -7195,7 +7179,7 @@ mod tests {
         with_pi_dir_override(&tmp, |pi_dir| {
             run_pi_mode(true, InitContext::default()).unwrap();
 
-            let agents_md = pi_dir.join(AGENTS_MD);
+            let agents_md = pi_dir.join("AGENTS.md");
             assert!(!agents_md.exists(), "AGENTS.md must not be created");
         });
     }
@@ -7223,7 +7207,7 @@ mod tests {
             "plugin must be written even when dir was absent"
         );
 
-        let agents_md = absent_dir.join(AGENTS_MD);
+        let agents_md = absent_dir.join("AGENTS.md");
         assert!(!agents_md.exists(), "AGENTS.md must not be created");
     }
 
