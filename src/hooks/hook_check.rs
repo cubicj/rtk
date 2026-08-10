@@ -1,7 +1,9 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
-use super::init::resolve_claude_dir;
+use super::constants::{
+    HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+};
+use super::init::{resolve_claude_dir, resolve_codex_dir};
 use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
@@ -24,6 +26,12 @@ pub enum HookStatus {
 /// Return the current hook status without printing anything.
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
+    if let Ok(codex_dir) = resolve_codex_dir() {
+        if codex_hook_registered(&codex_dir) {
+            return HookStatus::Ok;
+        }
+    }
+
     // Don't warn users who don't have Claude Code installed
     let claude_dir = match resolve_claude_dir() {
         Ok(d) => d,
@@ -83,6 +91,19 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(is_claude_hook_command)
+}
+
+pub(crate) fn codex_hook_registered(codex_dir: &std::path::Path) -> bool {
+    let hooks_path = codex_dir.join(HOOKS_JSON);
+    let content = match std::fs::read_to_string(&hooks_path) {
+        Ok(c) if !c.trim().is_empty() => c,
+        _ => return false,
+    };
+    let root: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    super::init::codex_hook_already_present(&root)
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -165,7 +186,6 @@ mod tests {
             home.join(CURSOR_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(REWRITE_HOOK_FILE),
-            home.join(CODEX_DIR).join("AGENTS.md"),
             home.join(GEMINI_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(GEMINI_HOOK_FILE),
@@ -174,7 +194,7 @@ mod tests {
                 .join(HERMES_PLUGIN_NAME)
                 .join(HERMES_PLUGIN_MANIFEST_FILE),
         ];
-        paths.iter().any(|p| p.exists())
+        paths.iter().any(|p| p.exists()) || codex_hook_registered(&home.join(CODEX_DIR))
     }
 
     #[test]
@@ -270,10 +290,66 @@ mod tests {
     #[test]
     fn test_other_integration_codex() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
+        let path = tmp.path().join(CODEX_DIR).join(HOOKS_JSON);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"agents").unwrap();
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook codex"}]}]}}"#,
+        )
+        .unwrap();
         assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_codex_hook_registered_with_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("hooks.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook codex"}]}]}}"#,
+        )
+        .unwrap();
+
+        assert!(codex_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_codex_hook_registered_with_windows_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("hooks.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","commandWindows":"rtk.exe hook codex"}]}]}}"#,
+        )
+        .unwrap();
+
+        assert!(codex_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_codex_hook_registered_with_absolute_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("hooks.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/home/user/.cargo/bin/rtk hook codex","commandWindows":"C:\\Users\\user\\.cargo\\bin\\rtk.exe hook codex"}]}]}}"#,
+        )
+        .unwrap();
+
+        assert!(codex_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_codex_hook_not_registered_for_unrelated_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("hooks.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"notrtk hook codex"}]}]}}"#,
+        )
+        .unwrap();
+
+        assert!(!codex_hook_registered(tmp.path()));
     }
 
     #[test]

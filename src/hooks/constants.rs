@@ -14,6 +14,8 @@ pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
 pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 /// Native Rust hook command for Factory Droid.
 pub const DROID_HOOK_COMMAND: &str = "rtk hook droid";
+pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
+pub const CODEX_HOOK_COMMAND_WINDOWS: &str = "rtk.exe hook codex";
 /// Native Rust hook command for Mistral Vibe.
 pub const VIBE_HOOK_COMMAND: &str = "rtk hook vibe";
 

@@ -3,7 +3,8 @@
 use super::constants::RTK_DATA_DIR;
 use crate::core::config;
 use crate::core::tracking;
-use crate::hooks::constants::CLAUDE_DIR;
+use crate::hooks::constants::{CLAUDE_DIR, CODEX_DIR};
+use crate::hooks::hook_check::codex_hook_registered;
 use crate::hooks::init::resolve_claude_dir;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
@@ -371,7 +372,6 @@ fn detect_hook_type() -> String {
         (claude_dir.join("hooks/rtk-rewrite.sh"), "claude"),
         (claude_dir.join("hooks/rtk-rewrite.json"), "claude"),
         (home.join(".gemini/hooks/rtk-hook.sh"), "gemini"),
-        (home.join(".codex/AGENTS.md"), "codex"),
         (home.join(".cursor/hooks/rtk-rewrite.json"), "cursor"),
         (home.join(".vibe/hooks.toml"), "vibe"),
     ];
@@ -380,6 +380,10 @@ fn detect_hook_type() -> String {
         if path.exists() {
             return name.to_string();
         }
+    }
+
+    if codex_hook_registered(&home.join(CODEX_DIR)) {
+        return "codex".to_string();
     }
 
     // Check project-level hooks (Claude script + project-scoped Copilot config)
