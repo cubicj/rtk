@@ -802,7 +802,11 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    process_claude_payload_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Claude))
+    let decision = match decide_hook_action(cmd, permissions::Host::Claude) {
+        HookDecision::AskRewrite(rewritten) => HookDecision::AllowRewrite(rewritten),
+        other => other,
+    };
+    process_claude_payload_from_decision(v, cmd, decision)
 }
 
 pub fn run_codex() -> Result<()> {
@@ -1769,20 +1773,7 @@ mod tests {
         let hook = &v["hookSpecificOutput"];
 
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
-        let claude_result = run_claude_inner(&claude_input("git status")).unwrap();
-        let claude: Value = serde_json::from_str(&claude_result).unwrap();
-        assert_eq!(v, claude);
-        let input: Value = serde_json::from_str(&codex_input("git status")).unwrap();
-        match process_claude_payload_from_decision(
-            &input,
-            "git status",
-            HookDecision::AllowRewrite("rtk git status".to_string()),
-        ) {
-            PayloadAction::Rewrite { output, .. } => {
-                assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
-            }
-            other => panic!("expected Rewrite, got {other:?}"),
-        }
+        assert_eq!(hook["permissionDecision"], "allow");
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
