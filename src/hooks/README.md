@@ -90,7 +90,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Cursor (rtk hook cursor) | Ready | `permission: "ask",` — users will be prompted when Cursor enforces the permission; in the meantime, allow |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
-| Codex (rtk hook codex) | ask parsed but no-op | allow (limitation — fails open) |
+| Codex (rtk hook codex) | No (`ask` unsupported with `updatedInput`) | Claude rules not consulted; `allow` on every rewrite, Codex approval/sandbox then evaluates the rewritten command; substitutions, file redirects, and unknown `permission_mode` pass through |
 | Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
 
 ### Implementation

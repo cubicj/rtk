@@ -782,31 +782,49 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
-fn process_codex_payload(v: &Value) -> PayloadAction {
-    if v.get("hook_event_name")
-        .is_some_and(|e| e.as_str() != Some(PRE_TOOL_USE_KEY))
-    {
-        return PayloadAction::Ignore;
-    }
+fn is_supported_codex_permission_mode(v: &Value) -> bool {
+    matches!(
+        v.get("permission_mode").and_then(Value::as_str),
+        Some("default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions")
+    )
+}
 
-    if v.get("tool_name").and_then(|t| t.as_str()) != Some("Bash") {
+fn process_codex_payload(v: &Value) -> PayloadAction {
+    if v.get("hook_event_name").and_then(Value::as_str) != Some(PRE_TOOL_USE_KEY)
+        || !matches!(
+            v.get("tool_name").and_then(Value::as_str),
+            Some("Bash" | "bash")
+        )
+    {
         return PayloadAction::Ignore;
     }
 
     let cmd = match v
         .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
+        .and_then(Value::as_str)
         .filter(|c| !c.is_empty())
     {
         Some(c) => c,
         None => return PayloadAction::Ignore,
     };
 
-    let decision = match decide_hook_action(cmd, permissions::Host::Claude) {
-        HookDecision::AskRewrite(rewritten) => HookDecision::AllowRewrite(rewritten),
-        other => other,
+    if !is_supported_codex_permission_mode(v)
+        || crate::discover::lexer::contains_unattestable_construct(cmd)
+    {
+        return PayloadAction::Skip {
+            decision: HookOutcome::Defer,
+            cmd: cmd.to_string(),
+        };
+    }
+
+    let Some(rewritten) = get_rewritten(cmd) else {
+        return PayloadAction::Skip {
+            decision: HookOutcome::Defer,
+            cmd: cmd.to_string(),
+        };
     };
-    process_claude_payload_from_decision(v, cmd, decision)
+
+    process_claude_payload_from_decision(v, cmd, HookDecision::AllowRewrite(rewritten))
 }
 
 pub fn run_codex() -> Result<()> {
@@ -1726,7 +1744,12 @@ mod tests {
 
     fn codex_input(cmd: &str) -> String {
         json!({
+            "session_id": "thr_1",
+            "turn_id": "turn_1",
+            "hook_event_name": PRE_TOOL_USE_KEY,
+            "permission_mode": "default",
             "tool_name": "Bash",
+            "tool_use_id": "call_1",
             "tool_input": { "command": cmd }
         })
         .to_string()
@@ -1734,6 +1757,8 @@ mod tests {
 
     fn codex_input_with_fields(cmd: &str, timeout: u64, description: &str) -> String {
         json!({
+            "hook_event_name": PRE_TOOL_USE_KEY,
+            "permission_mode": "default",
             "tool_name": "Bash",
             "tool_input": {
                 "command": cmd,
@@ -1742,6 +1767,43 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    #[test]
+    fn test_codex_permission_mode_gate() {
+        let mut input: Value = serde_json::from_str(&codex_input("git status")).unwrap();
+        for mode in [
+            "default",
+            "acceptEdits",
+            "plan",
+            "dontAsk",
+            "bypassPermissions",
+        ] {
+            input["permission_mode"] = json!(mode);
+            assert!(
+                run_codex_inner(&input.to_string()).is_some(),
+                "expected rewrite for permission_mode {mode}"
+            );
+        }
+        for mode in [json!("future_mode"), json!(null), json!(1)] {
+            input["permission_mode"] = mode;
+            assert!(run_codex_inner(&input.to_string()).is_none());
+        }
+        input.as_object_mut().unwrap().remove("permission_mode");
+        assert!(run_codex_inner(&input.to_string()).is_none());
+    }
+
+    #[test]
+    fn test_codex_accepts_lowercase_bash_tool_name() {
+        let mut input: Value = serde_json::from_str(&codex_input("git status")).unwrap();
+        input["tool_name"] = json!("bash");
+        assert!(run_codex_inner(&input.to_string()).is_some());
+    }
+
+    #[test]
+    fn test_codex_no_rewrite_passthrough() {
+        assert!(run_codex_inner(&codex_input("htop")).is_none());
+        assert!(run_codex_inner(&codex_input("cat <<EOF\nhi\nEOF")).is_none());
     }
 
     #[test]
